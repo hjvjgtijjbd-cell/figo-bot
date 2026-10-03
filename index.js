@@ -1,182 +1,336 @@
-const { 
-    default: makeWASocket, 
-    useMultiFileAuthState, 
-    DisconnectReason, 
-    delay,
-    fetchLatestBaileysVersion
-} = require('@whiskeysockets/baileys');
-const TelegramBot = require('node-telegram-bot-api');
-const pino = require('pino');
+import os
+import sqlite3
+import logging
+import aiohttp
 
-// ==========================================
-// ⚙️ الإعدادات والمعلومات الخاصة بك
-// ==========================================
-const TELEGRAM_BOT_TOKEN = '8897149412:AAE93kWJEJS5cbWXFnD0D4SFWz1H8yvPe0o'; 
-const TELEGRAM_CHAT_ID = '8629177824';   
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import CommandStart
+from aiogram.types import (
+    Message,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+)
 
-// 📱 اكتب رقم هاتفك الخاص بواتساب هنا بدون (+) (مثال للمغرب: 212600000000)
-const MY_PHONE_NUMBER = '212600000000'; 
+# =========================================================
+# CONFIG
+# =========================================================
 
-const tgBot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: false });
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-const blacklist = new Set();
-const userMessageTracker = new Map();
-const SPAM_THRESHOLD = 4;            
-const SPAM_TIME_FRAME = 8000;        
+# WhatsApp Cloud API
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
+WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
+WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "")
 
-const SCAM_WORDS = ['صيفط الكود', 'send code', 'كود التفعيل', 'ارسل الرمز', 'المبلغ', 'ربحت معنا'];
-const PHISHING_PATTERNS = [/https?:\/\/[^\s]+/g, /wa\.me\/settings/i];
+DB_FILE = "figo.db"
 
-async function sendTelegramAlert(message) {
-    try {
-        await tgBot.sendMessage(TELEGRAM_CHAT_ID, `🤖 *[FIGO ANTI-BAN MAX V3]*\n\n${message}`, { parse_mode: 'Markdown' });
-    } catch (error) {
-        console.error('❌ خطأ في إرسال إشعار تيليغرام:', error.message);
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+
+logger = logging.getLogger("FIGO")
+
+bot = Bot(BOT_TOKEN)
+dp = Dispatcher()
+
+# =========================================================
+# DATABASE
+# =========================================================
+
+db = sqlite3.connect(DB_FILE, check_same_thread=False)
+db.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    telegram_id INTEGER PRIMARY KEY,
+    phone TEXT,
+    connected INTEGER DEFAULT 0
+)
+""")
+db.commit()
+
+
+def save_phone(telegram_id: int, phone: str):
+    db.execute("""
+    INSERT INTO users (telegram_id, phone, connected)
+    VALUES (?, ?, 1)
+    ON CONFLICT(telegram_id)
+    DO UPDATE SET phone = excluded.phone,
+                  connected = 1
+    """, (telegram_id, phone))
+
+    db.commit()
+
+
+def disconnect_user(telegram_id: int):
+    db.execute(
+        "UPDATE users SET phone = NULL, connected = 0 "
+        "WHERE telegram_id = ?",
+        (telegram_id,)
+    )
+    db.commit()
+
+
+def get_user(telegram_id: int):
+    return db.execute(
+        "SELECT phone, connected FROM users WHERE telegram_id = ?",
+        (telegram_id,)
+    ).fetchone()
+
+
+# =========================================================
+# KEYBOARDS
+# =========================================================
+
+def main_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔗 ربط WhatsApp",
+                    callback_data="connect"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔓 فك الربط",
+                    callback_data="disconnect"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="ℹ️ الحالة",
+                    callback_data="status"
+                )
+            ]
+        ]
+    )
+
+
+def phone_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(
+                    text="📱 مشاركة رقم الهاتف",
+                    request_contact=True
+                )
+            ]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+
+
+# =========================================================
+# START
+# =========================================================
+
+@dp.message(CommandStart())
+async def start(message: Message):
+
+    text = (
+        "🤖 أهلاً بك في FIGO\n\n"
+        "يمكنك اختيار ربط WhatsApp أو فك الربط في أي وقت.\n\n"
+        "🔐 الخصوصية:\n"
+        "لا ترسل لي كلمة السر أو رموز تسجيل الدخول."
+    )
+
+    await message.answer(
+        text,
+        reply_markup=main_keyboard()
+    )
+
+
+# =========================================================
+# CONNECT BUTTON
+# =========================================================
+
+@dp.callback_query(F.data == "connect")
+async def connect_callback(callback):
+
+    await callback.answer()
+
+    await callback.message.answer(
+        "📱 إذا كنت تريد الربط، شارك رقم WhatsApp "
+        "الخاص بك باستعمال الزر التالي.\n\n"
+        "الاختيار بيدك ويمكنك فك الربط في أي وقت.",
+        reply_markup=phone_keyboard()
+    )
+
+
+# =========================================================
+# PHONE RECEIVED
+# =========================================================
+
+@dp.message(F.contact)
+async def phone_received(message: Message):
+
+    contact = message.contact
+
+    # Only accept the user's own Telegram contact
+    if contact.user_id != message.from_user.id:
+        await message.answer(
+            "⚠️ خاصك تشارك رقم الهاتف ديالك أنت."
+        )
+        return
+
+    phone = contact.phone_number
+
+    save_phone(
+        message.from_user.id,
+        phone
+    )
+
+    logger.info(
+        "WhatsApp connection requested | telegram_id=%s",
+        message.from_user.id
+    )
+
+    await message.answer(
+        "✅ تم تسجيل رقم الهاتف.\n\n"
+        "المرحلة التالية خاصها WhatsApp Business "
+        "Cloud API الرسمي لإتمام الربط.\n\n"
+        "⚠️ هذا البوت لا يطلب منك كود تسجيل الدخول.",
+        reply_markup=main_keyboard()
+    )
+
+
+# =========================================================
+# DISCONNECT
+# =========================================================
+
+@dp.callback_query(F.data == "disconnect")
+async def disconnect_callback(callback):
+
+    user_id = callback.from_user.id
+
+    disconnect_user(user_id)
+
+    await callback.answer(
+        "تم فك الربط."
+    )
+
+    await callback.message.answer(
+        "🔓 تم فك ربط WhatsApp.\n\n"
+        "تم حذف رقم الهاتف من قاعدة بيانات الربط.",
+        reply_markup=main_keyboard()
+    )
+
+
+# =========================================================
+# STATUS
+# =========================================================
+
+@dp.callback_query(F.data == "status")
+async def status_callback(callback):
+
+    user_id = callback.from_user.id
+    row = get_user(user_id)
+
+    if not row or not row[1]:
+        status = "🔴 غير مربوط"
+    else:
+        phone = row[0]
+
+        if phone:
+            masked = (
+                phone[:3] +
+                "****" +
+                phone[-3:]
+                if len(phone) > 7
+                else "********"
+            )
+
+            status = (
+                "🟢 مربوط\n"
+                f"📱 الرقم: {masked}"
+            )
+        else:
+            status = "🟡 في انتظار إتمام الربط"
+
+    await callback.answer()
+
+    await callback.message.answer(
+        f"📊 الحالة:\n\n{status}",
+        reply_markup=main_keyboard()
+    )
+
+
+# =========================================================
+# GROUP AUTO REPLY
+# =========================================================
+
+@dp.message(
+    F.chat.type.in_({"group", "supergroup"}),
+    F.text
+)
+async def group_messages(message: Message):
+
+    text = message.text.lower()
+
+    bot_info = await bot.get_me()
+
+    mentioned = False
+
+    if bot_info.username:
+        mentioned = (
+            f"@{bot_info.username.lower()}"
+            in text
+        )
+
+    if "فينك" in text or mentioned:
+
+        await message.reply(
+            "أنا مشغول دابا، البوت كيجاوب فبلاصتي 🤖"
+        )
+
+
+# =========================================================
+# PRIVATE AUTO REPLY
+# =========================================================
+
+@dp.message(F.chat.type == "private", F.text)
+async def private_messages(message: Message):
+
+    text = message.text.lower().strip()
+
+    greetings = {
+        "سلام",
+        "salam",
+        "hello",
+        "hi",
+        "hey",
+        "+"
     }
-}
 
-async function startBot() {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
-    const { version } = await fetchLatestBaileysVersion();
+    if text in greetings:
 
-    const sock = makeWASocket({
-        version,
-        logger: pino({ level: 'silent' }),
-        printQRInTerminal: false,
-        auth: state,
-        browser: ['Ubuntu', 'Chrome', '110.0.5563.64']
-    });
+        await message.answer(
+            "وعليكم السلام 👋\n\n"
+            "أنا مشغول دابا، البوت كيجاوب فبلاصتي 🤖"
+        )
 
-    if (!sock.authState.creds.registered) {
-        setTimeout(async () => {
-            try {
-                let code = await sock.requestPairingCode(MY_PHONE_NUMBER);
-                code = code?.match(/.{1,4}/g)?.join('-') || code;
-                console.log('\n==================================================');
-                console.log(`🔑 كود الربط الخاص بك هو: \x1b[32m${code}\x1b[0m`);
-                console.log('📱 افتح واتساب -> الأجهزة المرتبطة -> الربط برقم الهاتف وادخل الكود أعلاه.');
-                console.log('==================================================\n');
 
-                sendTelegramAlert(`🔑 *كود الربط الجديد:* \`${code}\`\n\nقم بفتح واتساب ثم الأجهزة المرتبطة واختيار الربط برقم الهاتف وإدخال الكود.`);
-            } catch (err) {
-                console.error('❌ خطأ في طلب كود الربط:', err);
-            }
-        }, 3000);
-    }
+# =========================================================
+# MAIN
+# =========================================================
 
-    sock.ev.on('creds.update', saveCreds);
+async def main():
 
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect } = update;
-        
-        if (connection === 'close') {
-            const shouldReconnect = (lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut);
-            console.log('⚠️ تم قطع الاتصال. إعادة الاتصال:', shouldReconnect);
-            if (shouldReconnect) startBot();
-        } else if (connection === 'open') {
-            console.log('✅ [FIGO BOT] متصل بنجاح ومحمّي ضد التغرات والبلاغات!');
-            sendTelegramAlert('✅ البوت شغال دابا ومحمّي بنجاح!');
-        }
-    });
+    if not BOT_TOKEN:
+        raise RuntimeError(
+            "BOT_TOKEN is missing"
+        )
 
-    sock.ev.on('messages.upsert', async (m) => {
-        try {
-            const msg = m.messages[0];
-            if (!msg.message || msg.key.fromMe) return;
+    logger.info("FIGO BOT STARTED")
 
-            const sender = msg.key.remoteJid;
-            const isGroup = sender.endsWith('@g.us');
-            const text = msg.message.conversation || 
-                         msg.message.extendedTextMessage?.text || 
-                         msg.message.imageMessage?.caption || '';
+    await dp.start_polling(bot)
 
-            // الحماية من الثغرات والنصوص الملغومة
-            if (text.length > 4000 || /[\u0610-\u061A\u064B-\u065F\u0670\u0D80-\u0DFF]{100,}/.test(text)) {
-                console.log(`🚨 [تغرة تبنيد/كرش] تم كشف محاولة إسقاط الحساب من: ${sender}`);
-                blacklist.add(sender);
-                await sendTelegramAlert(`🚨 *محاولة تبنيد بتغرة (Bug Text)!*\nتم حظر الرقم أوتوماتيكياً:\n\`${sender}\``);
-                if (!isGroup) await sock.updateBlockStatus(sender, 'block');
-                return;
-            }
 
-            if (blacklist.has(sender)) return;
+if __name__ == "__main__":
+    import asyncio
 
-            // الحماية من السبام
-            const now = Date.now();
-            const userData = userMessageTracker.get(sender) || { count: 0, lastMsgTime: now };
-
-            if (now - userData.lastMsgTime < SPAM_TIME_FRAME) {
-                userData.count += 1;
-            } else {
-                userData.count = 1;
-                userData.lastMsgTime = now;
-            }
-            userMessageTracker.set(sender, userData);
-
-            if (userData.count > SPAM_THRESHOLD) {
-                blacklist.add(sender);
-                console.log(`🚨 [حظر أوتوماتيكي] هجوم سبام من: ${sender}`);
-                await sendTelegramAlert(`🚨 *هجوم سبام كيهدد الحساب!*\nتم حظر الرقم:\n\`${sender}\``);
-                if (!isGroup) await sock.updateBlockStatus(sender, 'block');
-                return;
-            }
-
-            // كشف عمليات الاحتيال
-            const isScamWord = SCAM_WORDS.some(word => text.toLowerCase().includes(word));
-            const isPhishingLink = PHISHING_PATTERNS.some(pattern => pattern.test(text));
-
-            if (isScamWord || isPhishingLink) {
-                blacklist.add(sender);
-                await sendTelegramAlert(`⚠️ *محاولة احتيال!*\n*من:* \`${sender}\`\n*الرسالة:* ${text}`);
-                if (!isGroup) {
-                    await sock.sendMessage(sender, { text: '❌ تم حظرك تلقائياً.' });
-                    await sock.updateBlockStatus(sender, 'block');
-                }
-                return;
-            }
-
-            const smartDelayTime = Math.floor(Math.random() * 2500) + 2000;
-
-            if (!isGroup) {
-                const cleanText = text.trim().toLowerCase();
-                if (cleanText === '+' || cleanText === 'سلام' || cleanText === 'salam') {
-                    await delay(smartDelayTime);
-                    await sock.sendMessage(sender, { 
-                        text: 'وعليكم السلام! 👋 أنا بوت شغال فبلاصت مول الحساب، غايجاوبك فاش يرجع.' 
-                    }, { quoted: msg });
-
-                    sendTelegramAlert(`💬 *محادثة جديدة فالخاص*\n*من:* \`${sender}\`\n*الرسالة:* ${text}`);
-                }
-            }
-
-            if (isGroup) {
-                const botNumber = sock.user.id.split(':')[0] + '@s.whatsapp.net';
-                const mentionedJidList = msg.message.extendedTextMessage?.contextInfo?.mentionedJid || [];
-                const isMentioned = mentionedJidList.includes(botNumber);
-                const isCalled = text.toLowerCase().includes('فينك');
-
-                if (isMentioned || isCalled) {
-                    await delay(smartDelayTime);
-                    await sock.sendMessage(sender, { 
-                        text: 'أنا مشغول حالياً، البوت كيرد فبلاصتي! 🤖' 
-                    }, { quoted: msg });
-
-                    sendTelegramAlert(`👥 *تاغ فجروب*\n*المجموعة:* \`${sender}\`\n*النص:* ${text}`);
-                }
-            }
-
-        } catch (err) {
-            console.error('❌ خطأ في معالجة الرسالة:', err);
-        }
-    });
-
-    sock.ev.on('messages.update', async (updates) => {
-        for (const update of updates) {
-            if (update.update.message === null) {
-                sendTelegramAlert(`🗑️ *رسالة ممسوحة (Anti-Delete)*\n\n*من:* \`${update.key.remoteJid}\`\n*ID:* \`${update.key.id}\``);
-            }
-        }
-    });
-}
-
-startBot();
+    asyncio.run(main())
