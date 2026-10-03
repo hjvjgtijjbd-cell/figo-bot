@@ -1,11 +1,16 @@
 {
   "name": "figo-bot",
   "version": "1.0.0",
+  "description": "FIGO ANTI-BAN MAX V3",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "telegraf": "^4.15.0"
+    "@whiskeysockets/baileys": "^6.7.18",
+    "node-telegram-bot-api": "^0.66.0",
+    "pino": "^9.6.0",
+    "qrcode-terminal": "^0.12.0"
   }
 }
+
