@@ -7,22 +7,21 @@ const {
 } = require('@whiskeysockets/baileys');
 const TelegramBot = require('node-telegram-bot-api');
 const pino = require('pino');
-const readline = require('readline');
 
 // ==========================================
-// ⚙️ الإعدادات والمعلومات الخاصة بيك
+// ⚙️ الإعدادات والمعلومات الخاصة بك
 // ==========================================
-const TELEGRAM_BOT_TOKEN = 'ضع_هنا_TOKEN_ديال_تيليغرام'; 
-const TELEGRAM_CHAT_ID = 'ضع_هنا_CHAT_ID_ديال_تيليغرام';   
+const TELEGRAM_BOT_TOKEN = '8897149412:AAE93kWJEJS5cbWXFnD0D4SFWz1H8yvPe0o'; 
+const TELEGRAM_CHAT_ID = '8629177824';   
 
-// رقم هاتفك المربوط بواتساب (بدون رمز +) مثلاً: 212600000000
+// 📱 اكتب رقم هاتفك الخاص بواتساب هنا بدون (+) (مثال للمغرب: 212600000000)
 const MY_PHONE_NUMBER = '212600000000'; 
 
 const tgBot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: false });
 
 const blacklist = new Set();
 const userMessageTracker = new Map();
-const SPAM_THRESHOLD = 4;            // أقسى عدد رسائل فـ 8 ثواني
+const SPAM_THRESHOLD = 4;            
 const SPAM_TIME_FRAME = 8000;        
 
 const SCAM_WORDS = ['صيفط الكود', 'send code', 'كود التفعيل', 'ارسل الرمز', 'المبلغ', 'ربحت معنا'];
@@ -43,13 +42,11 @@ async function startBot() {
     const sock = makeWASocket({
         version,
         logger: pino({ level: 'silent' }),
-        printQRInTerminal: false, // تم إيقاف الـ QR كود
+        printQRInTerminal: false,
         auth: state,
-        // 🛡️ وضع الشبح الأقصى: التظاهر بأنك متصفح رسمي لتفادي خوارزميات الباند
         browser: ['Ubuntu', 'Chrome', '110.0.5563.64']
     });
 
-    // 🔑 طريقة الربط بالكود (Pairing Code) بدل QR Code
     if (!sock.authState.creds.registered) {
         setTimeout(async () => {
             try {
@@ -60,7 +57,7 @@ async function startBot() {
                 console.log('📱 افتح واتساب -> الأجهزة المرتبطة -> الربط برقم الهاتف وادخل الكود أعلاه.');
                 console.log('==================================================\n');
 
-                sendTelegramAlert(`🔑 *كود الربط الجديد:* \`${code}\``);
+                sendTelegramAlert(`🔑 *كود الربط الجديد:* \`${code}\`\n\nقم بفتح واتساب ثم الأجهزة المرتبطة واختيار الربط برقم الهاتف وإدخال الكود.`);
             } catch (err) {
                 console.error('❌ خطأ في طلب كود الربط:', err);
             }
@@ -82,7 +79,6 @@ async function startBot() {
         }
     });
 
-    // 📩 استقبال ومعالجة الرسائل بالحماية الفائقة
     sock.ev.on('messages.upsert', async (m) => {
         try {
             const msg = m.messages[0];
@@ -94,8 +90,7 @@ async function startBot() {
                          msg.message.extendedTextMessage?.text || 
                          msg.message.imageMessage?.caption || '';
 
-            // 🛡️ 1. الحماية من رسائل التغرات والـ Bugs (Anti-Crash)
-            // التغرات غالباً كتكون فيها أسطر ورموز غربية طويلة جداً كتبلوك الحساب
+            // الحماية من الثغرات والنصوص الملغومة
             if (text.length > 4000 || /[\u0610-\u061A\u064B-\u065F\u0670\u0D80-\u0DFF]{100,}/.test(text)) {
                 console.log(`🚨 [تغرة تبنيد/كرش] تم كشف محاولة إسقاط الحساب من: ${sender}`);
                 blacklist.add(sender);
@@ -106,7 +101,7 @@ async function startBot() {
 
             if (blacklist.has(sender)) return;
 
-            // 🛡️ 2. الحماية من البلاغات والسبام (Anti-Report & Anti-Spam)
+            // الحماية من السبام
             const now = Date.now();
             const userData = userMessageTracker.get(sender) || { count: 0, lastMsgTime: now };
 
@@ -126,7 +121,7 @@ async function startBot() {
                 return;
             }
 
-            // 🛡️ 3. كشف الشفارة والروابط الخبيثة
+            // كشف عمليات الاحتيال
             const isScamWord = SCAM_WORDS.some(word => text.toLowerCase().includes(word));
             const isPhishingLink = PHISHING_PATTERNS.some(pattern => pattern.test(text));
 
@@ -140,10 +135,8 @@ async function startBot() {
                 return;
             }
 
-            // 🕒 التأخير الذكي لمنع خوارزميات واتساب من كشف البوت (Smart Delay)
-            const smartDelayTime = Math.floor(Math.random() * 2500) + 2000; // بين 2 و 4.5 ثواني
+            const smartDelayTime = Math.floor(Math.random() * 2500) + 2000;
 
-            // 1. التفاعل فالخاص
             if (!isGroup) {
                 const cleanText = text.trim().toLowerCase();
                 if (cleanText === '+' || cleanText === 'سلام' || cleanText === 'salam') {
@@ -156,7 +149,6 @@ async function startBot() {
                 }
             }
 
-            // 2. التفاعل فالمجموعات
             if (isGroup) {
                 const botNumber = sock.user.id.split(':')[0] + '@s.whatsapp.net';
                 const mentionedJidList = msg.message.extendedTextMessage?.contextInfo?.mentionedJid || [];
@@ -178,7 +170,6 @@ async function startBot() {
         }
     });
 
-    // 👁️ مضاد الحذف (Anti-Delete)
     sock.ev.on('messages.update', async (updates) => {
         for (const update of updates) {
             if (update.update.message === null) {
