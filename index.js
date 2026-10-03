@@ -1,336 +1,67 @@
-import os
-import sqlite3
-import logging
-import aiohttp
-
-from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart
-from aiogram.types import (
-    Message,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
-)
-
-# =========================================================
-# CONFIG
-# =========================================================
-
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-
-# WhatsApp Cloud API
-WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
-WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
-WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "")
-
-DB_FILE = "figo.db"
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
-
-logger = logging.getLogger("FIGO")
-
-bot = Bot(BOT_TOKEN)
-dp = Dispatcher()
-
-# =========================================================
-# DATABASE
-# =========================================================
-
-db = sqlite3.connect(DB_FILE, check_same_thread=False)
-db.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    telegram_id INTEGER PRIMARY KEY,
-    phone TEXT,
-    connected INTEGER DEFAULT 0
-)
-""")
-db.commit()
-
-
-def save_phone(telegram_id: int, phone: str):
-    db.execute("""
-    INSERT INTO users (telegram_id, phone, connected)
-    VALUES (?, ?, 1)
-    ON CONFLICT(telegram_id)
-    DO UPDATE SET phone = excluded.phone,
-                  connected = 1
-    """, (telegram_id, phone))
-
-    db.commit()
-
-
-def disconnect_user(telegram_id: int):
-    db.execute(
-        "UPDATE users SET phone = NULL, connected = 0 "
-        "WHERE telegram_id = ?",
-        (telegram_id,)
-    )
-    db.commit()
-
-
-def get_user(telegram_id: int):
-    return db.execute(
-        "SELECT phone, connected FROM users WHERE telegram_id = ?",
-        (telegram_id,)
-    ).fetchone()
-
-
-# =========================================================
-# KEYBOARDS
-# =========================================================
-
-def main_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🔗 ربط WhatsApp",
-                    callback_data="connect"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🔓 فك الربط",
-                    callback_data="disconnect"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="ℹ️ الحالة",
-                    callback_data="status"
-                )
-            ]
-        ]
-    )
-
-
-def phone_keyboard():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(
-                    text="📱 مشاركة رقم الهاتف",
-                    request_contact=True
-                )
-            ]
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True
-    )
-
-
-# =========================================================
-# START
-# =========================================================
-
-@dp.message(CommandStart())
-async def start(message: Message):
-
-    text = (
-        "🤖 أهلاً بك في FIGO\n\n"
-        "يمكنك اختيار ربط WhatsApp أو فك الربط في أي وقت.\n\n"
-        "🔐 الخصوصية:\n"
-        "لا ترسل لي كلمة السر أو رموز تسجيل الدخول."
-    )
-
-    await message.answer(
-        text,
-        reply_markup=main_keyboard()
-    )
-
-
-# =========================================================
-# CONNECT BUTTON
-# =========================================================
-
-@dp.callback_query(F.data == "connect")
-async def connect_callback(callback):
-
-    await callback.answer()
-
-    await callback.message.answer(
-        "📱 إذا كنت تريد الربط، شارك رقم WhatsApp "
-        "الخاص بك باستعمال الزر التالي.\n\n"
-        "الاختيار بيدك ويمكنك فك الربط في أي وقت.",
-        reply_markup=phone_keyboard()
-    )
-
-
-# =========================================================
-# PHONE RECEIVED
-# =========================================================
-
-@dp.message(F.contact)
-async def phone_received(message: Message):
-
-    contact = message.contact
-
-    # Only accept the user's own Telegram contact
-    if contact.user_id != message.from_user.id:
-        await message.answer(
-            "⚠️ خاصك تشارك رقم الهاتف ديالك أنت."
-        )
-        return
-
-    phone = contact.phone_number
-
-    save_phone(
-        message.from_user.id,
-        phone
-    )
-
-    logger.info(
-        "WhatsApp connection requested | telegram_id=%s",
-        message.from_user.id
-    )
-
-    await message.answer(
-        "✅ تم تسجيل رقم الهاتف.\n\n"
-        "المرحلة التالية خاصها WhatsApp Business "
-        "Cloud API الرسمي لإتمام الربط.\n\n"
-        "⚠️ هذا البوت لا يطلب منك كود تسجيل الدخول.",
-        reply_markup=main_keyboard()
-    )
-
-
-# =========================================================
-# DISCONNECT
-# =========================================================
-
-@dp.callback_query(F.data == "disconnect")
-async def disconnect_callback(callback):
-
-    user_id = callback.from_user.id
-
-    disconnect_user(user_id)
-
-    await callback.answer(
-        "تم فك الربط."
-    )
-
-    await callback.message.answer(
-        "🔓 تم فك ربط WhatsApp.\n\n"
-        "تم حذف رقم الهاتف من قاعدة بيانات الربط.",
-        reply_markup=main_keyboard()
-    )
-
-
-# =========================================================
-# STATUS
-# =========================================================
-
-@dp.callback_query(F.data == "status")
-async def status_callback(callback):
-
-    user_id = callback.from_user.id
-    row = get_user(user_id)
-
-    if not row or not row[1]:
-        status = "🔴 غير مربوط"
-    else:
-        phone = row[0]
-
-        if phone:
-            masked = (
-                phone[:3] +
-                "****" +
-                phone[-3:]
-                if len(phone) > 7
-                else "********"
-            )
-
-            status = (
-                "🟢 مربوط\n"
-                f"📱 الرقم: {masked}"
-            )
-        else:
-            status = "🟡 في انتظار إتمام الربط"
-
-    await callback.answer()
-
-    await callback.message.answer(
-        f"📊 الحالة:\n\n{status}",
-        reply_markup=main_keyboard()
-    )
-
-
-# =========================================================
-# GROUP AUTO REPLY
-# =========================================================
-
-@dp.message(
-    F.chat.type.in_({"group", "supergroup"}),
-    F.text
-)
-async def group_messages(message: Message):
-
-    text = message.text.lower()
-
-    bot_info = await bot.get_me()
-
-    mentioned = False
-
-    if bot_info.username:
-        mentioned = (
-            f"@{bot_info.username.lower()}"
-            in text
-        )
-
-    if "فينك" in text or mentioned:
-
-        await message.reply(
-            "أنا مشغول دابا، البوت كيجاوب فبلاصتي 🤖"
-        )
-
-
-# =========================================================
-# PRIVATE AUTO REPLY
-# =========================================================
-
-@dp.message(F.chat.type == "private", F.text)
-async def private_messages(message: Message):
-
-    text = message.text.lower().strip()
-
-    greetings = {
-        "سلام",
-        "salam",
-        "hello",
-        "hi",
-        "hey",
-        "+"
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, delay } = require('@whiskeysockets/baileys')
+const pino = require('pino')
+const fs = require('fs')
+
+let config = fs.existsSync('./config.json')? JSON.parse(fs.readFileSync('./config.json')) : { mode: null }
+
+async function getAIReply(text, name){
+  const key = process.env.GEMINI_API_KEY
+  if(!key) return null
+  try{
+    const prompt = `انت مساعد مغربي ذكي، سميتك FIGO. كتهضر بدارجة مغربية زوينة ومحترمة وقصيرة. واحد سميتو ${name} قال ليك: "${text}". جاوبو كأنك مول النمرة الحقيقي مشغول، بذكاء وبدون ما تقول انك بوت. جاوب في سطر او سطرين فقط.`
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`,{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({contents:[{parts:[{text:prompt}]}]})
+    })
+    const data = await res.json()
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || null
+  }catch(e){ console.log("AI Error", e.message); return null }
+}
+
+async function startBot(){
+  const { state, saveCreds } = await useMultiFileAuthState('auth')
+  const sock = makeWASocket({ auth: state, logger: pino({level:'silent'}), markOnlineOnConnect:false })
+  if (!state.creds.registered){
+    const num = process.argv[2]
+    if(num){ await delay(2000); console.log("كود الربط:", await sock.requestPairingCode(num)) }
+  }
+  sock.ev.on('creds.update', saveCreds)
+
+  sock.ev.on('connection.update', async (u)=>{
+    if(u.connection==='open' &&!config.mode){
+      const owner = sock.user.id.split(':')[0]+'@s.whatsapp.net'
+      await sock.sendMessage(owner,{text:`🤖 *FIGO V3.2 AI*\n\nاختار المود:\n1 - 🛡️ حماية\n2 - 🧠 ذكاء اصطناعي\n3 - 👻 شبح + مضاد الحذف\n4 - 🔥 كلشي\n\nصيفط رقم`})
     }
+    if(u.connection==='close' && u.lastDisconnect?.error?.output?.statusCode!==DisconnectReason.loggedOut) startBot()
+  })
 
-    if text in greetings:
+  sock.ev.on('messages.upsert', async ({messages})=>{
+    for(const msg of messages){
+      if(!msg.message) continue
+      const from = msg.key.remoteJid
+      const text = msg.message.conversation || msg.message.extendedTextMessage?.text || ""
+      const sender = msg.key.participant || from
+      const owner = sock.user.id? sock.user.id.split(':')[0]+'@s.whatsapp.net':null
+      const name = msg.pushName || "الصديق"
 
-        await message.answer(
-            "وعليكم السلام 👋\n\n"
-            "أنا مشغول دابا، البوت كيجاوب فبلاصتي 🤖"
-        )
+      if(msg.key.fromMe && owner && from===owner && ['1','2','3','4'].includes(text.trim())){
+        config.mode=text.trim(); fs.writeFileSync('./config.json', JSON.stringify(config));
+        await sock.sendMessage(from,{text:`✅ تم تفعيل المود ${config.mode} - البوت دابا ذكي 🧠`}); continue
+      }
+      if(!config.mode || msg.key.fromMe) continue
 
-
-# =========================================================
-# MAIN
-# =========================================================
-
-async def main():
-
-    if not BOT_TOKEN:
-        raise RuntimeError(
-            "BOT_TOKEN is missing"
-        )
-
-    logger.info("FIGO BOT STARTED")
-
-    await dp.start_polling(bot)
-
-
-if __name__ == "__main__":
-    import asyncio
-
-    asyncio.run(main())
+      if(config.mode==='2' || config.mode==='4'){
+        const isGroup = from.endsWith('@g.us')
+        const shouldReply =!isGroup || msg.message.extendedTextMessage?.contextInfo?.mentionedJid?.includes(sock.user.id) || text.toLowerCase().includes('فيجو')
+        if(shouldReply && text.length>0){
+          await sock.sendPresenceUpdate('composing', from)
+          const ai = await getAIReply(text, name)
+          await delay(1000)
+          if(ai) await sock.sendMessage(from,{text: ai, mentions: isGroup? [sender]:[]})
+        }
+      }
+    }
+  })
+}
+startBot()
